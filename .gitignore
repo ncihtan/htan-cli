@@ -24,3 +24,6 @@ htmlcov/
 
 # Working data (not part of plugin)
 data/
+
+# Sphinx build output
+docs/_build/

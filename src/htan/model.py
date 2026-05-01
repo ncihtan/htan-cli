@@ -1,21 +1,22 @@
 """Query the HTAN Phase 1 data model (ncihtan/data-models).
 
 Fetches, caches, and queries the data model CSV from a pinned GitHub release tag.
-No extra dependencies — uses only stdlib (csv, json, urllib, argparse).
+No extra dependencies — uses only stdlib (csv, json, urllib).
 
-Usage as library:
+Usage as library::
+
     from htan.model import DataModel
     dm = DataModel()
     components = dm.components()
     attrs = dm.attributes("scRNA-seq Level 1")
 
-Usage as CLI:
+Usage as CLI::
+
     htan model components
     htan model attributes "scRNA-seq Level 1"
     htan model describe "Library Construction Method"
 """
 
-import argparse
 import csv
 import io
 import json
@@ -24,6 +25,8 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+
+import click
 
 MODEL_TAG = "v25.2.1"
 MODEL_URL_TEMPLATE = (
@@ -491,125 +494,168 @@ def _format_deps_text(chain):
 
 # --- CLI ---
 
+_MODEL_EPILOG = """\
+Examples:
+
+  htan model fetch
+  htan model components
+  htan model attributes "scRNA-seq Level 1"
+  htan model describe "Library Construction Method"
+  htan model valid-values "File Format"
+  htan model search "barcode"
+"""
+
+
+def _tag_option(f):
+    return click.option("--tag", default=None,
+                        help=f"Model version tag (default: {MODEL_TAG})")(f)
+
+
+def _format_option(f):
+    return click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+                        default="text", show_default=True, help="Output format")(f)
+
+
+@click.group(name="model", epilog=_MODEL_EPILOG)
+def model():
+    """Query the HTAN Phase 1 data model."""
+
+
+@model.command(name="fetch")
+@_tag_option
+@click.option("--dry-run", "dry_run", is_flag=True)
+def fetch_cmd(tag, dry_run):
+    """Download or refresh the model CSV cache."""
+    download_model(tag=tag, force=True, dry_run=dry_run)
+    if not dry_run:
+        click.echo(f"Model version: {tag or MODEL_TAG}", err=True)
+
+
+@model.command(name="components")
+@_tag_option
+@_format_option
+def components_cmd(tag, fmt):
+    """List all manifest components."""
+    dm = DataModel(tag=tag)
+    comps = dm.components()
+    if fmt == "json":
+        click.echo(json.dumps(comps, indent=2))
+    else:
+        click.echo(_format_components_text(comps))
+
+
+@model.command(name="attributes")
+@click.argument("component")
+@_tag_option
+@_format_option
+def attributes_cmd(component, tag, fmt):
+    """List attributes for a component."""
+    dm = DataModel(tag=tag)
+    comp_name, attrs = dm.attributes(component)
+    if fmt == "json":
+        click.echo(json.dumps({"component": comp_name, "attributes": attrs}, indent=2))
+    else:
+        click.echo(_format_attributes_text(comp_name, attrs))
+
+
+@model.command(name="describe")
+@click.argument("attribute")
+@_tag_option
+@_format_option
+def describe_cmd(attribute, tag, fmt):
+    """Full detail for one attribute."""
+    dm = DataModel(tag=tag)
+    detail = dm.describe(attribute)
+    if fmt == "json":
+        click.echo(json.dumps(detail, indent=2))
+    else:
+        click.echo(_format_describe_text(detail))
+
+
+@model.command(name="valid-values")
+@click.argument("attribute")
+@_tag_option
+@_format_option
+def valid_values_cmd(attribute, tag, fmt):
+    """List valid values for an attribute."""
+    dm = DataModel(tag=tag)
+    vv = dm.valid_values(attribute)
+    row = _find_attribute(dm._load(), attribute)
+    attr_name = row["Attribute"]
+    if fmt == "json":
+        click.echo(json.dumps({"attribute": attr_name, "valid_values": vv}, indent=2))
+    else:
+        click.echo(f"Valid values for '{attr_name}' ({len(vv)}):")
+        for v in vv:
+            click.echo(f"  {v}")
+        if not vv:
+            click.echo("  (none — free text or computed)")
+
+
+@model.command(name="search")
+@click.argument("keyword")
+@_tag_option
+@_format_option
+def search_cmd(keyword, tag, fmt):
+    """Search attributes by keyword."""
+    dm = DataModel(tag=tag)
+    results = dm.search(keyword)
+    click.echo(f"Searching for '{keyword}'...", err=True)
+    if fmt == "json":
+        click.echo(json.dumps(results, indent=2))
+    else:
+        if not results:
+            click.echo("No matches found.")
+        else:
+            click.echo(f"{'Attribute':<40} {'Parent':<25} {'Match In'}")
+            click.echo(f"{'-'*40} {'-'*25} {'-'*15}")
+            for r in results:
+                click.echo(f"{r['name']:<40} {r['parent']:<25} {r['match_in']}")
+            click.echo(f"\n{len(results)} matches")
+
+
+@model.command(name="required")
+@click.argument("component")
+@_tag_option
+@_format_option
+def required_cmd(component, tag, fmt):
+    """List required attributes for a component."""
+    dm = DataModel(tag=tag)
+    comp_name, attrs = dm.attributes(component)
+    required = [a for a in attrs if a["required"]]
+    if fmt == "json":
+        click.echo(json.dumps({"component": comp_name, "required_attributes": required}, indent=2))
+    else:
+        optional = [a for a in attrs if not a["required"]]
+        click.echo(f"Component: {comp_name}")
+        click.echo(f"Required: {len(required)}, Optional: {len(optional)}, Total: {len(attrs)}")
+        click.echo("\nRequired attributes:")
+        for attr in required:
+            vr = attr["validation_rules"]
+            suffix = f"  [{vr}]" if vr else ""
+            click.echo(f"  {attr['name']}{suffix}")
+
+
+@model.command(name="deps")
+@click.argument("component")
+@_tag_option
+@_format_option
+def deps_cmd(component, tag, fmt):
+    """Show dependency chain for a component."""
+    dm = DataModel(tag=tag)
+    chain = dm.deps(component)
+    if fmt == "json":
+        click.echo(json.dumps(chain, indent=2))
+    else:
+        click.echo(_format_deps_text(chain))
+
+
 def cli_main(argv=None):
-    """CLI entry point for data model queries."""
-    parser = argparse.ArgumentParser(
-        description="Query the HTAN Phase 1 data model (ncihtan/data-models)",
-        epilog="Examples:\n"
-        "  htan model fetch\n"
-        "  htan model components\n"
-        '  htan model attributes "scRNA-seq Level 1"\n'
-        '  htan model describe "Library Construction Method"\n'
-        '  htan model valid-values "File Format"\n'
-        '  htan model search "barcode"\n',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    def add_common_args(sp):
-        sp.add_argument("--tag", default=None, help=f"Model version tag (default: {MODEL_TAG})")
-        sp.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
-
-    sp_fetch = subparsers.add_parser("fetch", help="Download or refresh the model CSV")
-    sp_fetch.add_argument("--tag", default=None)
-    sp_fetch.add_argument("--format", choices=["text", "json"], default="text", help=argparse.SUPPRESS)
-    sp_fetch.add_argument("--dry-run", action="store_true")
-
-    sp_comp = subparsers.add_parser("components", help="List all manifest components")
-    add_common_args(sp_comp)
-
-    sp_attr = subparsers.add_parser("attributes", help="List attributes for a component")
-    sp_attr.add_argument("component", help="Component name")
-    add_common_args(sp_attr)
-
-    sp_desc = subparsers.add_parser("describe", help="Full detail for one attribute")
-    sp_desc.add_argument("attribute", help="Attribute name")
-    add_common_args(sp_desc)
-
-    sp_vv = subparsers.add_parser("valid-values", help="List valid values for an attribute")
-    sp_vv.add_argument("attribute", help="Attribute name")
-    add_common_args(sp_vv)
-
-    sp_search = subparsers.add_parser("search", help="Search attributes by keyword")
-    sp_search.add_argument("keyword", help="Keyword to search for")
-    add_common_args(sp_search)
-
-    sp_req = subparsers.add_parser("required", help="List required attributes for a component")
-    sp_req.add_argument("component", help="Component name")
-    add_common_args(sp_req)
-
-    sp_deps = subparsers.add_parser("deps", help="Show dependency chain for a component")
-    sp_deps.add_argument("component", help="Component name")
-    add_common_args(sp_deps)
-
-    args = parser.parse_args(argv)
-    dm = DataModel(tag=args.tag if hasattr(args, "tag") else None)
-
-    if args.command == "fetch":
-        download_model(tag=args.tag, force=True, dry_run=args.dry_run)
-        if not args.dry_run:
-            print(f"Model version: {args.tag or MODEL_TAG}", file=sys.stderr)
-    elif args.command == "components":
-        comps = dm.components()
-        if args.format == "json":
-            print(json.dumps(comps, indent=2))
-        else:
-            print(_format_components_text(comps))
-    elif args.command == "attributes":
-        comp_name, attrs = dm.attributes(args.component)
-        if args.format == "json":
-            print(json.dumps({"component": comp_name, "attributes": attrs}, indent=2))
-        else:
-            print(_format_attributes_text(comp_name, attrs))
-    elif args.command == "describe":
-        detail = dm.describe(args.attribute)
-        if args.format == "json":
-            print(json.dumps(detail, indent=2))
-        else:
-            print(_format_describe_text(detail))
-    elif args.command == "valid-values":
-        vv = dm.valid_values(args.attribute)
-        row = _find_attribute(dm._load(), args.attribute)
-        attr_name = row["Attribute"]
-        if args.format == "json":
-            print(json.dumps({"attribute": attr_name, "valid_values": vv}, indent=2))
-        else:
-            print(f"Valid values for '{attr_name}' ({len(vv)}):")
-            for v in vv:
-                print(f"  {v}")
-            if not vv:
-                print("  (none — free text or computed)")
-    elif args.command == "search":
-        results = dm.search(args.keyword)
-        print(f"Searching for '{args.keyword}'...", file=sys.stderr)
-        if args.format == "json":
-            print(json.dumps(results, indent=2))
-        else:
-            if not results:
-                print("No matches found.")
-            else:
-                print(f"{'Attribute':<40} {'Parent':<25} {'Match In'}")
-                print(f"{'-'*40} {'-'*25} {'-'*15}")
-                for r in results:
-                    print(f"{r['name']:<40} {r['parent']:<25} {r['match_in']}")
-                print(f"\n{len(results)} matches")
-    elif args.command == "required":
-        comp_name, attrs = dm.attributes(args.component)
-        required = [a for a in attrs if a["required"]]
-        if args.format == "json":
-            print(json.dumps({"component": comp_name, "required_attributes": required}, indent=2))
-        else:
-            optional = [a for a in attrs if not a["required"]]
-            print(f"Component: {comp_name}")
-            print(f"Required: {len(required)}, Optional: {len(optional)}, Total: {len(attrs)}")
-            print("\nRequired attributes:")
-            for attr in required:
-                vr = attr["validation_rules"]
-                suffix = f"  [{vr}]" if vr else ""
-                print(f"  {attr['name']}{suffix}")
-    elif args.command == "deps":
-        chain = dm.deps(args.component)
-        if args.format == "json":
-            print(json.dumps(chain, indent=2))
-        else:
-            print(_format_deps_text(chain))
+    """Backward-compatible entry point — invokes the Click :data:`model` group."""
+    try:
+        return model.main(args=argv, prog_name="htan model", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)

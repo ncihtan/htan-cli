@@ -1,22 +1,23 @@
 """Query HTAN data via the HTAN Data Portal's ClickHouse backend.
 
 The HTAN data portal (data.humantumoratlas.org) uses a ClickHouse cloud database.
-Credentials are loaded via htan.config (3-tier: env > keychain > config file).
-Queries via the HTTP interface — zero extra dependencies (stdlib only).
+Credentials are loaded via :mod:`htan.config` (3-tier: env > keychain > config file).
+Queries go through the HTTP interface — zero extra dependencies (stdlib only).
 
-Usage as library:
+Usage as library::
+
     from htan.query.portal import PortalClient
     client = PortalClient()
     files = client.find_files(organ="Breast", assay="scRNA-seq", limit=10)
     rows = client.query("SELECT count() FROM files")
 
-Usage as CLI:
+Usage as CLI::
+
     htan query portal tables
     htan query portal files --organ Breast --limit 5
     htan query portal sql "SELECT atlas_name, COUNT(*) as n FROM files GROUP BY atlas_name"
 """
 
-import argparse
 import base64
 import csv
 import io
@@ -28,6 +29,9 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from types import SimpleNamespace
+
+import click
 
 from htan.config import (
     ConfigError,
@@ -550,121 +554,197 @@ class PortalClient:
 
 # --- CLI ---
 
-def cli_main(argv=None):
-    """CLI entry point for portal queries."""
-    parser = argparse.ArgumentParser(
-        description="Query HTAN data via the portal ClickHouse backend",
-        epilog="Examples:\n"
-        "  htan query portal tables\n"
-        "  htan query portal describe files\n"
-        '  htan query portal files --organ Breast --assay "scRNA-seq" --limit 5\n'
-        "  htan query portal files --data-file-id HTA9_1_19512 --output json\n"
-        '  htan query portal sql "SELECT atlas_name, COUNT(*) as n FROM files GROUP BY atlas_name"\n'
-        "  htan query portal manifest HTA9_1_19512 --output-dir /tmp/manifests\n",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    def add_common_args(sp, include_limit=True):
-        if include_limit:
-            sp.add_argument("--limit", "-l", type=int, default=DEFAULT_LIMIT, help=f"Row limit (default: {DEFAULT_LIMIT})")
-        sp.add_argument("--output", "-o", choices=["text", "json", "csv"], default="text", help="Output format")
-        sp.add_argument("--dry-run", action="store_true", help="Show SQL without executing")
-        sp.add_argument("--database", "-d", help="Database name (default: auto-discover)")
-
-    # files
-    sp_files = subparsers.add_parser("files", help="Query files with filters")
-    sp_files.add_argument("--organ", help="Filter by organ type")
-    sp_files.add_argument("--assay", help="Filter by assay name")
-    sp_files.add_argument("--atlas", help="Filter by atlas name")
-    sp_files.add_argument("--level", help="Filter by data level")
-    sp_files.add_argument("--file-format", help="Filter by file format")
-    sp_files.add_argument("--filename", help="Filter by filename (substring)")
-    sp_files.add_argument("--data-file-id", nargs="+", help="Look up specific HTAN_Data_File_ID(s)")
-    add_common_args(sp_files)
-
-    # demographics
-    sp_demo = subparsers.add_parser("demographics", help="Query patient demographics")
-    sp_demo.add_argument("--atlas", help="Filter by atlas name")
-    sp_demo.add_argument("--gender", help="Filter by gender")
-    sp_demo.add_argument("--race", help="Filter by race")
-    add_common_args(sp_demo)
-
-    # diagnosis
-    sp_diag = subparsers.add_parser("diagnosis", help="Query diagnosis information")
-    sp_diag.add_argument("--atlas", help="Filter by atlas name")
-    sp_diag.add_argument("--organ", help="Filter by tissue/organ of origin")
-    sp_diag.add_argument("--primary-diagnosis", help="Filter by primary diagnosis")
-    add_common_args(sp_diag)
-
-    # cases
-    sp_cases = subparsers.add_parser("cases", help="Query merged cases")
-    sp_cases.add_argument("--atlas", help="Filter by atlas name")
-    sp_cases.add_argument("--organ", help="Filter by tissue/organ of origin")
-    add_common_args(sp_cases)
-
-    # specimen
-    sp_spec = subparsers.add_parser("specimen", help="Query biospecimen metadata")
-    sp_spec.add_argument("--atlas", help="Filter by atlas name")
-    sp_spec.add_argument("--preservation", help="Filter by preservation method")
-    sp_spec.add_argument("--tissue-type", help="Filter by tumor tissue type")
-    add_common_args(sp_spec)
-
-    # summary
-    sp_summary = subparsers.add_parser("summary", help="Show HTAN data summary")
-    sp_summary.add_argument("--output", "-o", choices=["text", "json"], default="text", help="Output format")
-    sp_summary.add_argument("--dry-run", action="store_true", help="Show what would be queried")
-    sp_summary.add_argument("--database", "-d", help="Database name")
-
-    # sql
-    sp_sql = subparsers.add_parser("sql", help="Execute a direct read-only SQL query")
-    sp_sql.add_argument("sql", help="SQL query to execute")
-    sp_sql.add_argument("--limit", "-l", type=int, default=SQL_DEFAULT_LIMIT, help=f"Row limit (default: {SQL_DEFAULT_LIMIT})")
-    sp_sql.add_argument("--no-limit", action="store_true", help="Skip auto-applying LIMIT")
-    sp_sql.add_argument("--output", "-o", choices=["text", "json", "csv"], default="text", help="Output format")
-    sp_sql.add_argument("--dry-run", action="store_true", help="Show SQL without executing")
-    sp_sql.add_argument("--database", "-d", help="Database name")
-
-    # tables
-    sp_tables = subparsers.add_parser("tables", help="List available tables")
-    sp_tables.add_argument("--dry-run", action="store_true", help="Show what would be queried")
-    sp_tables.add_argument("--database", "-d", help="Database name")
-
-    # describe
-    sp_desc = subparsers.add_parser("describe", help="Describe table schema")
-    sp_desc.add_argument("table_name", help="Table name")
-    sp_desc.add_argument("--dry-run", action="store_true", help="Show what would be queried")
-    sp_desc.add_argument("--database", "-d", help="Database name")
-
-    # manifest
-    sp_manifest = subparsers.add_parser("manifest", help="Generate download manifests from file IDs")
-    sp_manifest.add_argument("ids", nargs="*", help="HTAN_Data_File_IDs")
-    sp_manifest.add_argument("--file", "-f", help="File containing IDs (one per line)")
-    sp_manifest.add_argument("--output-dir", default=".", help="Directory for manifest files")
-    sp_manifest.add_argument("--dry-run", action="store_true", help="Show SQL without executing")
-    sp_manifest.add_argument("--database", "-d", help="Database name")
-
-    args = parser.parse_args(argv)
-
-    # Dispatch to handler functions
-    handlers = {
-        "files": _cmd_files, "demographics": _cmd_demographics,
-        "diagnosis": _cmd_diagnosis, "cases": _cmd_cases,
-        "specimen": _cmd_specimen, "summary": _cmd_summary,
-        "sql": _cmd_sql, "tables": _cmd_tables,
-        "describe": _cmd_describe, "manifest": _cmd_manifest,
-    }
-
+def _run(handler, args):
+    """Run a portal command handler with consistent error handling."""
     try:
-        handlers[args.command](args)
+        handler(args)
     except PortalError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        click.echo(f"Error: {e}", err=True)
         for hint in e.hints:
-            print(f"Hint: {hint}", file=sys.stderr)
-        sys.exit(1)
+            click.echo(f"Hint: {hint}", err=True)
+        raise click.exceptions.Exit(1)
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+_PORTAL_EPILOG = """\
+Examples:
+
+  htan query portal tables
+  htan query portal describe files
+  htan query portal files --organ Breast --assay "scRNA-seq" --limit 5
+  htan query portal files --data-file-id HTA9_1_19512 --output json
+  htan query portal sql "SELECT atlas_name, COUNT(*) as n FROM files GROUP BY atlas_name"
+  htan query portal manifest HTA9_1_19512 --output-dir /tmp/manifests
+"""
+
+
+@click.group(epilog=_PORTAL_EPILOG)
+def portal():
+    """Query HTAN data via the portal ClickHouse backend."""
+
+
+@portal.command()
+@click.option("--organ", help="Filter by organ type")
+@click.option("--assay", help="Filter by assay name")
+@click.option("--atlas", help="Filter by atlas name")
+@click.option("--level", help="Filter by data level")
+@click.option("--file-format", "file_format", help="Filter by file format")
+@click.option("--filename", help="Filter by filename (substring)")
+@click.option("--data-file-id", "data_file_id", multiple=True,
+              help="Look up specific HTAN_Data_File_ID(s)")
+@click.option("--limit", "-l", type=int, default=DEFAULT_LIMIT, show_default=True,
+              help="Row limit")
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]),
+              default="text", show_default=True, help="Output format")
+@click.option("--dry-run", "dry_run", is_flag=True, help="Show SQL without executing")
+@click.option("--database", "-d", help="Database name (default: auto-discover)")
+def files(organ, assay, atlas, level, file_format, filename, data_file_id,
+          limit, output, dry_run, database):
+    """Query files with filters."""
+    args = SimpleNamespace(
+        organ=organ, assay=assay, atlas=atlas, level=level,
+        file_format=file_format, filename=filename,
+        data_file_id=list(data_file_id) if data_file_id else None,
+        limit=limit, output=output, dry_run=dry_run, database=database,
+    )
+    _run(_cmd_files, args)
+
+
+@portal.command()
+@click.option("--atlas", help="Filter by atlas name")
+@click.option("--gender", help="Filter by gender")
+@click.option("--race", help="Filter by race")
+@click.option("--limit", "-l", type=int, default=DEFAULT_LIMIT, show_default=True)
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def demographics(atlas, gender, race, limit, output, dry_run, database):
+    """Query patient demographics."""
+    args = SimpleNamespace(atlas=atlas, gender=gender, race=race,
+                           limit=limit, output=output, dry_run=dry_run, database=database)
+    _run(_cmd_demographics, args)
+
+
+@portal.command()
+@click.option("--atlas", help="Filter by atlas name")
+@click.option("--organ", help="Filter by tissue/organ of origin")
+@click.option("--primary-diagnosis", "primary_diagnosis", help="Filter by primary diagnosis")
+@click.option("--limit", "-l", type=int, default=DEFAULT_LIMIT, show_default=True)
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def diagnosis(atlas, organ, primary_diagnosis, limit, output, dry_run, database):
+    """Query diagnosis information."""
+    args = SimpleNamespace(atlas=atlas, organ=organ, primary_diagnosis=primary_diagnosis,
+                           limit=limit, output=output, dry_run=dry_run, database=database)
+    _run(_cmd_diagnosis, args)
+
+
+@portal.command()
+@click.option("--atlas", help="Filter by atlas name")
+@click.option("--organ", help="Filter by tissue/organ of origin")
+@click.option("--limit", "-l", type=int, default=DEFAULT_LIMIT, show_default=True)
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def cases(atlas, organ, limit, output, dry_run, database):
+    """Query merged cases."""
+    args = SimpleNamespace(atlas=atlas, organ=organ, limit=limit, output=output,
+                           dry_run=dry_run, database=database)
+    _run(_cmd_cases, args)
+
+
+@portal.command()
+@click.option("--atlas", help="Filter by atlas name")
+@click.option("--preservation", help="Filter by preservation method")
+@click.option("--tissue-type", "tissue_type", help="Filter by tumor tissue type")
+@click.option("--limit", "-l", type=int, default=DEFAULT_LIMIT, show_default=True)
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def specimen(atlas, preservation, tissue_type, limit, output, dry_run, database):
+    """Query biospecimen metadata."""
+    args = SimpleNamespace(atlas=atlas, preservation=preservation, tissue_type=tissue_type,
+                           limit=limit, output=output, dry_run=dry_run, database=database)
+    _run(_cmd_specimen, args)
+
+
+@portal.command()
+@click.option("--output", "-o", type=click.Choice(["text", "json"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def summary(output, dry_run, database):
+    """Show HTAN data summary."""
+    args = SimpleNamespace(output=output, dry_run=dry_run, database=database)
+    _run(_cmd_summary, args)
+
+
+@portal.command(name="sql")
+@click.argument("sql_query")
+@click.option("--limit", "-l", type=int, default=SQL_DEFAULT_LIMIT, show_default=True,
+              help="Row limit")
+@click.option("--no-limit", "no_limit", is_flag=True, help="Skip auto-applying LIMIT")
+@click.option("--output", "-o", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def sql_cmd(sql_query, limit, no_limit, output, dry_run, database):
+    """Execute a direct read-only SQL query."""
+    args = SimpleNamespace(sql=sql_query, limit=limit, no_limit=no_limit,
+                           output=output, dry_run=dry_run, database=database)
+    _run(_cmd_sql, args)
+
+
+@portal.command()
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def tables(dry_run, database):
+    """List available tables."""
+    args = SimpleNamespace(dry_run=dry_run, database=database)
+    _run(_cmd_tables, args)
+
+
+@portal.command()
+@click.argument("table_name")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def describe(table_name, dry_run, database):
+    """Describe table schema."""
+    args = SimpleNamespace(table_name=table_name, dry_run=dry_run, database=database)
+    _run(_cmd_describe, args)
+
+
+@portal.command()
+@click.argument("ids", nargs=-1)
+@click.option("--file", "-f", "file", help="File containing IDs (one per line)")
+@click.option("--output-dir", "output_dir", default=".", show_default=True,
+              help="Directory for manifest files")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--database", "-d")
+def manifest(ids, file, output_dir, dry_run, database):
+    """Generate download manifests from file IDs."""
+    args = SimpleNamespace(ids=list(ids), file=file, output_dir=output_dir,
+                           dry_run=dry_run, database=database)
+    _run(_cmd_manifest, args)
+
+
+def cli_main(argv=None):
+    """Backward-compatible entry point — invokes the Click :data:`portal` group.
+
+    Args:
+        argv: List of CLI arguments (e.g., ``["tables"]``). If ``None``, uses ``sys.argv``.
+
+    Returns ``None`` on success; raises :class:`SystemExit` on errors or when a
+    Click action (such as ``--help``) requests an exit.
+    """
+    try:
+        return portal.main(args=argv, prog_name="htan query portal", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)
 
 
 # --- CLI handler functions (mirror original cmd_* functions) ---

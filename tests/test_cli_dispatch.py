@@ -1,142 +1,140 @@
-"""Tests for htan.cli — command routing / dispatch logic."""
+"""Tests for htan.cli — Click command tree composition.
 
-import sys
-from unittest.mock import patch, MagicMock
+After the migration to Click, dispatch is handled by Click's group/subcommand
+mechanism rather than by hand-rolled ``_dispatch_*`` helpers. We verify here
+that subcommands resolve to the expected groups and produce sensible help/usage
+output for invalid inputs.
+"""
 
-import pytest
+from click.testing import CliRunner
 
-from htan.cli import main, _dispatch_query, _dispatch_download, _dispatch_config
-
-
-# ===========================================================================
-# _dispatch_query
-# ===========================================================================
-
-def test_dispatch_query_portal():
-    with patch("htan.query.portal.cli_main") as mock_cli:
-        _dispatch_query(["portal", "tables"])
-    mock_cli.assert_called_once_with(["tables"])
+from htan.cli import cli
 
 
-def test_dispatch_query_bq():
-    with patch("htan.query.bq.cli_main") as mock_cli:
-        _dispatch_query(["bq", "tables"])
-    mock_cli.assert_called_once_with(["tables"])
-
-
-def test_dispatch_query_no_args():
-    with pytest.raises(SystemExit):
-        _dispatch_query([])
-
-
-def test_dispatch_query_unknown_backend():
-    with pytest.raises(SystemExit):
-        _dispatch_query(["unknown_backend"])
+def _run(args):
+    runner = CliRunner()
+    return runner.invoke(cli, args)
 
 
 # ===========================================================================
-# _dispatch_download
+# Top-level structure
 # ===========================================================================
 
-def test_dispatch_download_synapse():
-    with patch("htan.download.synapse.cli_main") as mock_cli:
-        _dispatch_download(["synapse", "syn12345678"])
-    mock_cli.assert_called_once_with(["syn12345678"])
+def test_cli_help():
+    result = _run(["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    for cmd in ("query", "download", "pubs", "model", "files", "init", "config"):
+        assert cmd in result.output
 
 
-def test_dispatch_download_gen3():
-    with patch("htan.download.gen3.cli_main") as mock_cli:
-        _dispatch_download(["gen3", "download", "drs://dg.4DFC/abc"])
-    mock_cli.assert_called_once_with(["download", "drs://dg.4DFC/abc"])
+def test_cli_version():
+    result = _run(["--version"])
+    assert result.exit_code == 0
+    assert "htan" in result.output
 
 
-def test_dispatch_download_no_args():
-    with pytest.raises(SystemExit):
-        _dispatch_download([])
+def test_cli_unknown_command():
+    result = _run(["definitely-not-a-real-command"])
+    assert result.exit_code != 0
 
 
-def test_dispatch_download_unknown_backend():
-    with pytest.raises(SystemExit):
-        _dispatch_download(["ftp"])
-
-
-# ===========================================================================
-# _dispatch_config
-# ===========================================================================
-
-def test_dispatch_config_check(capsys):
-    with patch("htan.config.check_setup", return_value={"portal": "configured"}):
-        _dispatch_config(["check"])
-    out = capsys.readouterr().out
-    assert '"ok": true' in out
-
-
-def test_dispatch_config_help(capsys):
-    _dispatch_config(["--help"])
-    out = capsys.readouterr().out
-    assert "Usage:" in out
-
-
-def test_dispatch_config_init_portal():
-    with patch("htan.init.cli_main") as mock_init:
-        _dispatch_config(["init-portal"])
-    mock_init.assert_called_once_with(["portal"])
-
-
-def test_dispatch_config_unknown():
-    with pytest.raises(SystemExit):
-        _dispatch_config(["unknown_cmd"])
-
-
-def test_dispatch_config_no_args(capsys):
-    """No args defaults to 'check'."""
-    with patch("htan.config.check_setup", return_value={"portal": "none"}):
-        _dispatch_config([])
-    out = capsys.readouterr().out
-    assert '"ok": true' in out
+def test_cli_no_args_shows_usage():
+    result = _run([])
+    # Click groups exit 2 when no subcommand is supplied; usage goes to stdout.
+    assert result.exit_code == 2
+    assert "Usage:" in result.output
 
 
 # ===========================================================================
-# main() routing
+# Subgroup composition
 # ===========================================================================
 
-def test_main_routes_pubs():
-    with patch("htan.pubs.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "pubs", "search"]):
-        main()
-    mock_cli.assert_called_once_with(["search"])
+def test_query_group_lists_backends():
+    result = _run(["query", "--help"])
+    assert result.exit_code == 0
+    assert "portal" in result.output
+    assert "bq" in result.output
 
 
-def test_main_routes_model():
-    with patch("htan.model.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "model", "components"]):
-        main()
-    mock_cli.assert_called_once_with(["components"])
+def test_query_no_backend():
+    result = _run(["query"])
+    assert result.exit_code == 2
 
 
-def test_main_routes_files():
-    with patch("htan.files.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "files", "stats"]):
-        main()
-    mock_cli.assert_called_once_with(["stats"])
+def test_query_unknown_backend():
+    result = _run(["query", "unknown-backend"])
+    assert result.exit_code != 0
 
 
-def test_main_routes_init():
-    with patch("htan.init.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "init"]):
-        main()
-    mock_cli.assert_called_once_with([])
+def test_download_group_lists_backends():
+    result = _run(["download", "--help"])
+    assert result.exit_code == 0
+    assert "synapse" in result.output
+    assert "gen3" in result.output
 
 
-def test_main_routes_query():
-    with patch("htan.query.portal.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "query", "portal", "tables"]):
-        main()
-    mock_cli.assert_called_once_with(["tables"])
+def test_download_no_backend():
+    result = _run(["download"])
+    assert result.exit_code == 2
 
 
-def test_main_routes_download():
-    with patch("htan.download.synapse.cli_main") as mock_cli, \
-         patch.object(sys, "argv", ["htan", "download", "synapse", "syn123"]):
-        main()
-    mock_cli.assert_called_once_with(["syn123"])
+def test_download_unknown_backend():
+    result = _run(["download", "ftp"])
+    assert result.exit_code != 0
+
+
+# ===========================================================================
+# config
+# ===========================================================================
+
+def test_config_check_emits_json():
+    result = _run(["config", "check"])
+    assert result.exit_code == 0
+    assert '"ok": true' in result.output
+
+
+def test_config_help():
+    result = _run(["config", "--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+
+
+def test_config_unknown_subcommand():
+    result = _run(["config", "definitely-not-a-real-subcommand"])
+    assert result.exit_code != 0
+
+
+# ===========================================================================
+# Top-level subcommands resolve
+# ===========================================================================
+
+def test_pubs_resolves():
+    result = _run(["pubs", "--help"])
+    assert result.exit_code == 0
+    assert "search" in result.output
+
+
+def test_model_resolves():
+    result = _run(["model", "--help"])
+    assert result.exit_code == 0
+    assert "components" in result.output
+
+
+def test_files_resolves():
+    result = _run(["files", "--help"])
+    assert result.exit_code == 0
+    assert "lookup" in result.output
+
+
+def test_init_resolves():
+    result = _run(["init", "--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+
+
+def test_query_portal_resolves():
+    result = _run(["query", "portal", "--help"])
+    assert result.exit_code == 0
+    assert "tables" in result.output
+    assert "describe" in result.output

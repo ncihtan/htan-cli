@@ -40,7 +40,8 @@ def test_cli_no_args():
         capture_output=True, text=True, timeout=10,
     )
     assert result.returncode != 0
-    assert "Usage:" in result.stdout
+    # Click prints "missing command" usage to stderr
+    assert "Usage:" in (result.stdout + result.stderr)
 
 
 def test_cli_query_no_backend():

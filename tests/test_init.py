@@ -331,11 +331,11 @@ def test_cli_main_status(capsys):
 
 
 def test_cli_main_help(capsys):
-    """cli_main --help prints usage."""
+    """cli_main --help prints usage and returns cleanly under Click."""
     from htan.init import cli_main
-    with pytest.raises(SystemExit) as exc_info:
-        cli_main(["--help"])
-    assert exc_info.value.code == 0
+    cli_main(["--help"])
+    captured = capsys.readouterr()
+    assert "Usage:" in captured.out
 
 
 # ---------------------------------------------------------------------------
