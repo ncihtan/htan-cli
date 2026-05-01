@@ -109,8 +109,9 @@ def test_gen3_cli_resolve_dry_run():
 # synapse CLI — help
 # ===========================================================================
 
-def test_synapse_cli_help():
+def test_synapse_cli_help(capsys):
+    """cli_main(['--help']) prints usage and returns cleanly under Click."""
     from htan.download.synapse import cli_main
-    with pytest.raises(SystemExit) as exc_info:
-        cli_main(["--help"])
-    assert exc_info.value.code == 0
+    cli_main(["--help"])
+    captured = capsys.readouterr()
+    assert "Usage:" in captured.out

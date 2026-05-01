@@ -1,23 +1,24 @@
 """Download HTAN controlled-access data from CRDC/Gen3 via DRS URIs.
 
-Requires: pip install htan[gen3]
+Usage as library::
 
-Usage as library:
     from htan.download.gen3 import download, resolve
     path = download("drs://dg.4DFC/guid-here", output_dir="./data")
     url = resolve("drs://dg.4DFC/guid-here")
 
-Usage as CLI:
-    htan download gen3 "drs://dg.4DFC/guid-here"
-    htan download gen3 "drs://dg.4DFC/guid-here" --dry-run
+Usage as CLI::
+
+    htan download gen3 download "drs://dg.4DFC/guid-here"
+    htan download gen3 resolve "drs://dg.4DFC/guid-here"
 """
 
-import argparse
 import json
 import os
 import re
 import sys
 import urllib.request
+
+import click
 
 
 GEN3_ENDPOINT = "https://nci-crdc.datacommons.io"
@@ -170,69 +171,79 @@ def download(drs_uri, output_dir=".", credentials=None, protocol="s3", dry_run=F
 
 # --- CLI ---
 
+_GEN3_EPILOG = """\
+Examples:
+
+  htan download gen3 download "drs://dg.4DFC/guid" --credentials creds.json
+  htan download gen3 download "drs://dg.4DFC/guid" --dry-run
+  htan download gen3 resolve "drs://dg.4DFC/guid"
+"""
+
+
+@click.group(name="gen3", epilog=_GEN3_EPILOG)
+def gen3():
+    """Download HTAN controlled-access data from CRDC/Gen3."""
+
+
+@gen3.command(name="download")
+@click.argument("drs_uri", required=False)
+@click.option("--manifest", "-m", help="File with DRS URIs (one per line)")
+@click.option("--credentials", "-c", help="Path to Gen3 credentials JSON")
+@click.option("--output-dir", "-o", "output_dir", default=".", show_default=True)
+@click.option("--protocol", type=click.Choice(["s3", "gs"]), default="s3", show_default=True)
+@click.option("--dry-run", "dry_run", is_flag=True)
+def download_cmd(drs_uri, manifest, credentials, output_dir, protocol, dry_run):
+    """Download files by DRS URI (or via a manifest file)."""
+    if manifest:
+        if not os.path.exists(manifest):
+            click.echo(f"Error: Manifest file not found: {manifest}", err=True)
+            raise click.exceptions.Exit(1)
+        uris = []
+        with open(manifest) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    uris.append(line)
+    elif drs_uri:
+        uris = [drs_uri]
+    else:
+        click.echo("Error: Provide a DRS URI or --manifest file.", err=True)
+        raise click.exceptions.Exit(1)
+
+    for i, uri in enumerate(uris, 1):
+        if len(uris) > 1:
+            click.echo(f"\n[{i}/{len(uris)}]", err=True)
+        path = download(uri, output_dir=output_dir, credentials=credentials,
+                        protocol=protocol, dry_run=dry_run)
+        if path:
+            click.echo(path)
+
+
+@gen3.command(name="resolve")
+@click.argument("drs_uri")
+@click.option("--credentials", "-c", help="Path to Gen3 credentials JSON")
+@click.option("--protocol", type=click.Choice(["s3", "gs"]), default="s3", show_default=True)
+@click.option("--dry-run", "dry_run", is_flag=True)
+def resolve_cmd(drs_uri, credentials, protocol, dry_run):
+    """Resolve DRS URI to a signed download URL."""
+    if dry_run:
+        _validate_drs_uri(drs_uri)
+        guid = _extract_guid(drs_uri)
+        click.echo("Dry run — would resolve:", err=True)
+        click.echo(f"  DRS URI: {drs_uri}", err=True)
+        click.echo(f"  GUID: {guid}", err=True)
+        return
+
+    url = resolve(drs_uri, credentials=credentials, protocol=protocol)
+    click.echo(url)
+
+
 def cli_main(argv=None):
-    """CLI entry point for Gen3/CRDC downloads."""
-    parser = argparse.ArgumentParser(
-        description="Download HTAN controlled-access data from CRDC/Gen3",
-        epilog="Examples:\n"
-        '  htan download gen3 "drs://dg.4DFC/guid" --credentials creds.json\n'
-        '  htan download gen3 "drs://dg.4DFC/guid" --dry-run\n',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    sp_dl = subparsers.add_parser("download", help="Download files by DRS URI")
-    sp_dl.add_argument("drs_uri", nargs="?", help="DRS URI")
-    sp_dl.add_argument("--manifest", "-m", help="File with DRS URIs (one per line)")
-    sp_dl.add_argument("--credentials", "-c", help="Path to Gen3 credentials JSON")
-    sp_dl.add_argument("--output-dir", "-o", default=".", help="Output directory")
-    sp_dl.add_argument("--protocol", choices=["s3", "gs"], default="s3")
-    sp_dl.add_argument("--dry-run", action="store_true")
-
-    sp_res = subparsers.add_parser("resolve", help="Resolve DRS URI to signed URL")
-    sp_res.add_argument("drs_uri", help="DRS URI to resolve")
-    sp_res.add_argument("--credentials", "-c", help="Path to Gen3 credentials JSON")
-    sp_res.add_argument("--protocol", choices=["s3", "gs"], default="s3")
-    sp_res.add_argument("--dry-run", action="store_true")
-
-    args = parser.parse_args(argv)
-
-    if args.command == "download":
-        if args.manifest:
-            # Read URIs from manifest
-            if not os.path.exists(args.manifest):
-                print(f"Error: Manifest file not found: {args.manifest}", file=sys.stderr)
-                sys.exit(1)
-            uris = []
-            with open(args.manifest) as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        uris.append(line)
-        elif args.drs_uri:
-            uris = [args.drs_uri]
-        else:
-            print("Error: Provide a DRS URI or --manifest file.", file=sys.stderr)
-            sys.exit(1)
-
-        downloaded = []
-        for i, uri in enumerate(uris, 1):
-            if len(uris) > 1:
-                print(f"\n[{i}/{len(uris)}]", file=sys.stderr)
-            path = download(uri, output_dir=args.output_dir, credentials=args.credentials,
-                          protocol=args.protocol, dry_run=args.dry_run)
-            if path:
-                downloaded.append(path)
-                print(path)
-
-    elif args.command == "resolve":
-        if args.dry_run:
-            _validate_drs_uri(args.drs_uri)
-            guid = _extract_guid(args.drs_uri)
-            print(f"Dry run — would resolve:", file=sys.stderr)
-            print(f"  DRS URI: {args.drs_uri}", file=sys.stderr)
-            print(f"  GUID: {guid}", file=sys.stderr)
-            return
-
-        url = resolve(args.drs_uri, credentials=args.credentials, protocol=args.protocol)
-        print(url)
+    """Backward-compatible entry point — invokes the Click :data:`gen3` group."""
+    try:
+        return gen3.main(args=argv, prog_name="htan download gen3", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)

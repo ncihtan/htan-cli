@@ -1,26 +1,28 @@
 """Query HTAN metadata in ISB-CGC BigQuery.
 
 Supports direct SQL, table listing, and schema inspection.
-Requires: pip install htan[bigquery]
 
-Usage as library:
+Usage as library::
+
     from htan.query.bq import BigQueryClient
     client = BigQueryClient()
     tables = client.list_tables()
     schema = client.describe_table("clinical_tier1_demographics")
 
-Usage as CLI:
+Usage as CLI::
+
     htan query bq tables
     htan query bq describe clinical_tier1_demographics
     htan query bq sql "SELECT COUNT(*) FROM ..."
 """
 
-import argparse
 import csv
 import io
 import json
 import re
 import sys
+
+import click
 
 
 HTAN_DATASET = "isb-cgc-bq.HTAN"
@@ -202,128 +204,145 @@ class BigQueryClient:
 
 # --- CLI ---
 
-def cli_main(argv=None):
-    """CLI entry point for BigQuery queries."""
-    parser = argparse.ArgumentParser(
-        description="Query HTAN metadata in ISB-CGC BigQuery",
-        epilog="Examples:\n"
-        "  htan query bq tables\n"
-        "  htan query bq describe clinical_tier1_demographics\n"
-        '  htan query bq sql "SELECT COUNT(*) FROM `isb-cgc-bq.HTAN.clinical_tier1_demographics_current`"\n'
-        '  htan query bq query "How many breast cancer patients?"\n',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+_BQ_EPILOG = """\
+Examples:
 
-    sp_query = subparsers.add_parser("query", help="Natural language query (outputs context for Claude)")
-    sp_query.add_argument("question", help="Natural language question")
-    sp_query.add_argument("--project", "-p", help="Google Cloud project ID")
-    sp_query.add_argument("--format", "-f", choices=["text", "json", "csv"], default="text")
+  htan query bq tables
+  htan query bq describe clinical_tier1_demographics
+  htan query bq sql "SELECT COUNT(*) FROM `isb-cgc-bq.HTAN.clinical_tier1_demographics_current`"
+  htan query bq query "How many breast cancer patients?"
+"""
 
-    sp_sql = subparsers.add_parser("sql", help="Execute a direct SQL query")
-    sp_sql.add_argument("sql", help="SQL query")
-    sp_sql.add_argument("--project", "-p", help="Google Cloud project ID")
-    sp_sql.add_argument("--format", "-f", choices=["text", "json", "csv"], default="text")
-    sp_sql.add_argument("--dry-run", action="store_true")
 
-    sp_tables = subparsers.add_parser("tables", help="List available HTAN tables")
-    sp_tables.add_argument("--project", "-p", help="Google Cloud project ID")
-    sp_tables.add_argument("--dry-run", action="store_true")
-    sp_tables.add_argument("--versioned", action="store_true")
+@click.group(name="bq", epilog=_BQ_EPILOG)
+def bq():
+    """Query HTAN metadata in ISB-CGC BigQuery."""
 
-    sp_desc = subparsers.add_parser("describe", help="Describe table schema")
-    sp_desc.add_argument("table_name", help="Table name")
-    sp_desc.add_argument("--project", "-p", help="Google Cloud project ID")
-    sp_desc.add_argument("--dry-run", action="store_true")
-    sp_desc.add_argument("--versioned", action="store_true")
 
-    args = parser.parse_args(argv)
+@bq.command(name="query")
+@click.argument("question")
+@click.option("--project", "-p", help="Google Cloud project ID")
+@click.option("--format", "-f", "fmt", type=click.Choice(["text", "json", "csv"]), default="text")
+def query_cmd(question, project, fmt):
+    """Output natural-language query context for an LLM (does not execute)."""
+    click.echo("=== HTAN BigQuery Natural Language Query ===")
+    click.echo()
+    click.echo(f"USER QUESTION: {question}")
+    click.echo()
+    click.echo(TABLE_SCHEMAS_SUMMARY)
+    click.echo()
+    click.echo("=== INSTRUCTIONS ===")
+    click.echo("Generate a safe read-only SQL query against isb-cgc-bq.HTAN tables.")
+    click.echo('Then execute with: htan query bq sql "YOUR_SQL_HERE"')
 
-    if args.command == "query":
-        # Output NL query context for Claude
-        print("=== HTAN BigQuery Natural Language Query ===")
-        print()
-        print("USER QUESTION:", args.question)
-        print()
-        print(TABLE_SCHEMAS_SUMMARY)
-        print()
-        print("=== INSTRUCTIONS ===")
-        print("Generate a safe read-only SQL query against isb-cgc-bq.HTAN tables.")
-        print("Then execute with: htan query bq sql \"YOUR_SQL_HERE\"")
-        return
 
+def _bq_client_or_exit(project):
     try:
-        client = BigQueryClient(project=getattr(args, "project", None))
+        return BigQueryClient(project=project)
     except BigQueryError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
 
-    if args.command == "sql":
-        try:
-            if args.dry_run:
-                result = client.query(args.sql, dry_run=True)
-                bytes_est = result["bytes_processed"]
-                if bytes_est > 1_000_000_000:
-                    cost_str = f"{bytes_est / 1_000_000_000:.2f} GB"
-                elif bytes_est > 1_000_000:
-                    cost_str = f"{bytes_est / 1_000_000:.1f} MB"
-                else:
-                    cost_str = f"{bytes_est:,} bytes"
-                print(f"Dry run — estimated data processed: {cost_str}", file=sys.stderr)
-                print(f"SQL:\n{result['sql']}", file=sys.stderr)
-                return
 
-            df = client.query(args.sql)
-            if df.empty:
-                print("Query returned no results.", file=sys.stderr)
-                return
-            print(f"Returned {len(df)} rows, {len(df.columns)} columns", file=sys.stderr)
-            if args.format == "json":
-                print(df.to_json(orient="records", indent=2))
-            elif args.format == "csv":
-                output = io.StringIO()
-                df.to_csv(output, index=False, quoting=csv.QUOTE_NONNUMERIC)
-                print(output.getvalue())
+@bq.command(name="sql")
+@click.argument("sql_query")
+@click.option("--project", "-p", help="Google Cloud project ID")
+@click.option("--format", "-f", "fmt", type=click.Choice(["text", "json", "csv"]), default="text")
+@click.option("--dry-run", "dry_run", is_flag=True)
+def sql_cmd(sql_query, project, fmt, dry_run):
+    """Execute a direct SQL query."""
+    client = _bq_client_or_exit(project)
+    try:
+        if dry_run:
+            result = client.query(sql_query, dry_run=True)
+            bytes_est = result["bytes_processed"]
+            if bytes_est > 1_000_000_000:
+                cost_str = f"{bytes_est / 1_000_000_000:.2f} GB"
+            elif bytes_est > 1_000_000:
+                cost_str = f"{bytes_est / 1_000_000:.1f} MB"
             else:
-                print(df.to_string(index=False))
-        except BigQueryError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.command == "tables":
-        if args.dry_run:
-            dataset = HTAN_DATASET_VERSIONED if args.versioned else HTAN_DATASET
-            print(f"Dry run — would list tables from {dataset}", file=sys.stderr)
+                cost_str = f"{bytes_est:,} bytes"
+            click.echo(f"Dry run — estimated data processed: {cost_str}", err=True)
+            click.echo(f"SQL:\n{result['sql']}", err=True)
             return
-        try:
-            tables = client.list_tables(versioned=args.versioned)
-            for t in tables:
-                print(t)
-            print(f"\n{len(tables)} tables", file=sys.stderr)
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
 
-    elif args.command == "describe":
-        if args.dry_run:
-            print(f"Dry run — would describe: {args.table_name}", file=sys.stderr)
+        df = client.query(sql_query)
+        if df.empty:
+            click.echo("Query returned no results.", err=True)
             return
-        try:
-            info = client.describe_table(args.table_name, versioned=args.versioned)
-            print(f"Table: {info['table']}")
-            print(f"Rows: {info['num_rows']:,}")
-            print(f"Size: {info['num_bytes']:,} bytes")
-            if info["description"]:
-                print(f"Description: {info['description']}")
-            print()
-            print(f"{'Column':<40} {'Type':<15} {'Mode':<10} {'Description'}")
-            print(f"{'-'*40} {'-'*15} {'-'*10} {'-'*30}")
-            for f in info["schema"]:
-                desc = f["description"]
-                if len(desc) > 50:
-                    desc = desc[:47] + "..."
-                print(f"{f['name']:<40} {f['type']:<15} {f['mode']:<10} {desc}")
-            print(f"\n{len(info['schema'])} columns", file=sys.stderr)
-        except BigQueryError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+        click.echo(f"Returned {len(df)} rows, {len(df.columns)} columns", err=True)
+        if fmt == "json":
+            click.echo(df.to_json(orient="records", indent=2))
+        elif fmt == "csv":
+            output = io.StringIO()
+            df.to_csv(output, index=False, quoting=csv.QUOTE_NONNUMERIC)
+            click.echo(output.getvalue())
+        else:
+            click.echo(df.to_string(index=False))
+    except BigQueryError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+@bq.command(name="tables")
+@click.option("--project", "-p", help="Google Cloud project ID")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--versioned", is_flag=True, help="Use the HTAN_versioned dataset")
+def tables_cmd(project, dry_run, versioned):
+    """List available HTAN tables."""
+    if dry_run:
+        dataset = HTAN_DATASET_VERSIONED if versioned else HTAN_DATASET
+        click.echo(f"Dry run — would list tables from {dataset}", err=True)
+        return
+    client = _bq_client_or_exit(project)
+    try:
+        rows = client.list_tables(versioned=versioned)
+        for t in rows:
+            click.echo(t)
+        click.echo(f"\n{len(rows)} tables", err=True)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+@bq.command(name="describe")
+@click.argument("table_name")
+@click.option("--project", "-p", help="Google Cloud project ID")
+@click.option("--dry-run", "dry_run", is_flag=True)
+@click.option("--versioned", is_flag=True, help="Use the HTAN_versioned dataset")
+def describe_cmd(table_name, project, dry_run, versioned):
+    """Describe table schema."""
+    if dry_run:
+        click.echo(f"Dry run — would describe: {table_name}", err=True)
+        return
+    client = _bq_client_or_exit(project)
+    try:
+        info = client.describe_table(table_name, versioned=versioned)
+        click.echo(f"Table: {info['table']}")
+        click.echo(f"Rows: {info['num_rows']:,}")
+        click.echo(f"Size: {info['num_bytes']:,} bytes")
+        if info["description"]:
+            click.echo(f"Description: {info['description']}")
+        click.echo()
+        click.echo(f"{'Column':<40} {'Type':<15} {'Mode':<10} {'Description'}")
+        click.echo(f"{'-'*40} {'-'*15} {'-'*10} {'-'*30}")
+        for f in info["schema"]:
+            desc = f["description"]
+            if len(desc) > 50:
+                desc = desc[:47] + "..."
+            click.echo(f"{f['name']:<40} {f['type']:<15} {f['mode']:<10} {desc}")
+        click.echo(f"\n{len(info['schema'])} columns", err=True)
+    except BigQueryError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+def cli_main(argv=None):
+    """Backward-compatible entry point — invokes the Click :data:`bq` group."""
+    try:
+        return bq.main(args=argv, prog_name="htan query bq", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)

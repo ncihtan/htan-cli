@@ -5,24 +5,27 @@ lookup by HTAN_Data_File_ID to get download coordinates for both platforms.
 
 No extra dependencies — uses only stdlib (urllib, json).
 
-Usage as library:
+Usage as library::
+
     from htan.files import lookup, update_cache, stats
     results = lookup(["HTA9_1_19512"])
     update_cache()
 
-Usage as CLI:
+Usage as CLI::
+
     htan files lookup HTA9_1_19512
     htan files update
     htan files stats
 """
 
-import argparse
 import json
 import os
 import re
 import sys
 import urllib.error
 import urllib.request
+
+import click
 
 MAPPING_URL = (
     "https://raw.githubusercontent.com/ncihtan/htan-portal/"
@@ -228,70 +231,86 @@ def _format_json_output(results):
     return json.dumps(output, indent=2)
 
 
+_FILES_EPILOG = """\
+Examples:
+
+  htan files update
+  htan files lookup HTA9_1_19512
+  htan files lookup HTA9_1_19512 HTA9_1_19553 --format json
+  htan files stats
+"""
+
+
+@click.group(name="files", epilog=_FILES_EPILOG)
+def files():
+    """HTAN file mapping: resolve HTAN_Data_File_ID to download coordinates."""
+
+
+@files.command(name="update")
+def update_cmd():
+    """Download or refresh the mapping cache."""
+    update_cache()
+
+
+@files.command(name="lookup")
+@click.argument("ids", nargs=-1)
+@click.option("--file", "-f", "file_path",
+              help="File containing IDs (one per line)")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True, help="Output format")
+def lookup_cmd(ids, file_path, fmt):
+    """Look up HTAN_Data_File_IDs."""
+    file_ids = list(ids) if ids else []
+    if file_path:
+        try:
+            with open(file_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        file_ids.append(line)
+        except FileNotFoundError:
+            click.echo(f"Error: File not found: {file_path}", err=True)
+            raise click.exceptions.Exit(1)
+
+    if not file_ids:
+        click.echo("Error: No file IDs provided.", err=True)
+        raise click.exceptions.Exit(1)
+
+    for fid in file_ids:
+        if not FILE_ID_PATTERN.match(fid):
+            click.echo(f"Warning: '{fid}' does not match expected format (HTA*_*_*)", err=True)
+
+    results = lookup(file_ids)
+    if not results:
+        click.echo("No matching records found.", err=True)
+        raise click.exceptions.Exit(1)
+
+    click.echo(f"Found {len(results)}/{len(file_ids)} files", err=True)
+    if fmt == "json":
+        click.echo(_format_json_output(results))
+    else:
+        click.echo(_format_text_output(results))
+
+
+@files.command(name="stats")
+def stats_cmd():
+    """Show mapping statistics."""
+    s = stats()
+    click.echo(f"Total files: {s['total_files']:,}")
+    click.echo(f"With Synapse entityId: {s['with_synapse_entity_id']:,}")
+    click.echo(f"With DRS URI (Gen3): {s['with_drs_uri']:,}")
+    click.echo()
+    click.echo("Files per center:")
+    for center, count in s["files_per_center"].items():
+        click.echo(f"  {center:<25} {count:>6,}")
+
+
 def cli_main(argv=None):
-    """CLI entry point for file mapping."""
-    parser = argparse.ArgumentParser(
-        description="HTAN file mapping: resolve HTAN_Data_File_ID to download coordinates",
-        epilog="Examples:\n"
-        "  htan files update\n"
-        "  htan files lookup HTA9_1_19512\n"
-        "  htan files lookup HTA9_1_19512 HTA9_1_19553 --format json\n"
-        "  htan files stats\n",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("update", help="Download or refresh the mapping cache")
-
-    sp_lookup = subparsers.add_parser("lookup", help="Look up HTAN_Data_File_IDs")
-    sp_lookup.add_argument("ids", nargs="*", help="HTAN_Data_File_IDs")
-    sp_lookup.add_argument("--file", "-f", help="File containing IDs (one per line)")
-    sp_lookup.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
-
-    subparsers.add_parser("stats", help="Show mapping statistics")
-
-    args = parser.parse_args(argv)
-
-    if args.command == "update":
-        update_cache()
-    elif args.command == "lookup":
-        file_ids = list(args.ids) if args.ids else []
-        if args.file:
-            try:
-                with open(args.file, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            file_ids.append(line)
-            except FileNotFoundError:
-                print(f"Error: File not found: {args.file}", file=sys.stderr)
-                sys.exit(1)
-
-        if not file_ids:
-            print("Error: No file IDs provided.", file=sys.stderr)
-            sys.exit(1)
-
-        for fid in file_ids:
-            if not FILE_ID_PATTERN.match(fid):
-                print(f"Warning: '{fid}' does not match expected format (HTA*_*_*)", file=sys.stderr)
-
-        results = lookup(file_ids)
-        if not results:
-            print("No matching records found.", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"Found {len(results)}/{len(file_ids)} files", file=sys.stderr)
-        if args.format == "json":
-            print(_format_json_output(results))
-        else:
-            print(_format_text_output(results))
-
-    elif args.command == "stats":
-        s = stats()
-        print(f"Total files: {s['total_files']:,}")
-        print(f"With Synapse entityId: {s['with_synapse_entity_id']:,}")
-        print(f"With DRS URI (Gen3): {s['with_drs_uri']:,}")
-        print()
-        print("Files per center:")
-        for center, count in s["files_per_center"].items():
-            print(f"  {center:<25} {count:>6,}")
+    """Backward-compatible entry point — invokes the Click :data:`files` group."""
+    try:
+        return files.main(args=argv, prog_name="htan files", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)

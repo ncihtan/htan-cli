@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
+    "click>=8.1",
     "synapseclient>=4.0",
     "gen3>=4.27",
     "google-cloud-bigquery>=3.40",
@@ -20,6 +21,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.1"]
+docs = [
+    "sphinx>=7.3",
+    "furo>=2024.5",
+    "sphinx-click>=6.0",
+    "myst-parser>=3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/ncihtan/htan-cli"

@@ -15,7 +15,6 @@ Usage::
     htan init --force                  # Re-run even if configured
 """
 
-import argparse
 import base64
 import json
 import os
@@ -25,6 +24,8 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import click
 
 from htan.config import (
     check_setup,
@@ -624,65 +625,51 @@ def run_init(services=None, force=False, non_interactive=False, status_only=Fals
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def cli_main(args=None):
-    """Argparse entry point for ``htan init``.
+_INIT_EPILOG = """\
+Examples:
 
-    Args:
-        args: List of arguments (default: sys.argv style from CLI dispatcher).
-    """
-    parser = argparse.ArgumentParser(
-        prog="htan init",
-        description="Interactive setup wizard for HTAN CLI credentials",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  htan init                     # Full interactive wizard\n"
-            "  htan init portal              # Set up portal only\n"
-            "  htan init synapse             # Set up synapse only\n"
-            "  htan init --status            # Show current config status\n"
-            "  htan init --non-interactive   # CI mode: detect only\n"
-            "  htan init --force             # Re-run even if configured\n"
-        ),
-    )
-    parser.add_argument(
-        "service",
-        nargs="?",
-        choices=["portal", "synapse", "bigquery", "gen3"],
-        default=None,
-        help="Set up a specific service (default: interactive menu)",
-    )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show current configuration status and exit",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-run setup even if already configured",
-    )
-    parser.add_argument(
-        "--non-interactive",
-        action="store_true",
-        help="Detect existing config only — no interactive prompts (CI mode)",
-    )
+  htan init                     # Full interactive wizard
+  htan init portal              # Set up portal only
+  htan init synapse             # Set up synapse only
+  htan init --status            # Show current config status
+  htan init --non-interactive   # CI mode: detect only
+  htan init --force             # Re-run even if configured
+"""
 
-    parsed = parser.parse_args(args)
 
-    services = [parsed.service] if parsed.service else None
+@click.command(name="init", epilog=_INIT_EPILOG)
+@click.argument("service", required=False,
+                type=click.Choice(["portal", "synapse", "bigquery", "gen3"]))
+@click.option("--status", is_flag=True,
+              help="Show current configuration status and exit")
+@click.option("--force", is_flag=True,
+              help="Re-run setup even if already configured")
+@click.option("--non-interactive", "non_interactive", is_flag=True,
+              help="Detect existing config only — no interactive prompts (CI mode)")
+def init(service, status, force, non_interactive):
+    """Interactive setup wizard for HTAN CLI credentials."""
+    services = [service] if service else None
 
     result = run_init(
         services=services,
-        force=parsed.force,
-        non_interactive=parsed.non_interactive,
-        status_only=parsed.status,
+        force=force,
+        non_interactive=non_interactive,
+        status_only=status,
     )
 
-    # Exit non-zero if any requested service failed
     if result and isinstance(result, dict):
-        # For status_only, exit 0 always
-        if parsed.status:
+        if status:
             return
-        # For init, exit 1 if any service is False
         if any(v is False for v in result.values()):
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
+
+
+def cli_main(args=None):
+    """Backward-compatible entry point — invokes the Click :data:`init` command."""
+    try:
+        return init.main(args=args, prog_name="htan init", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)

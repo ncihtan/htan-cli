@@ -1,20 +1,21 @@
 """Download HTAN open-access files from Synapse by entity ID.
 
-Requires: pip install htan[synapse]
+Usage as library::
 
-Usage as library:
     from htan.download.synapse import download
     path = download("syn26535909", output_dir="./data")
 
-Usage as CLI:
+Usage as CLI::
+
     htan download synapse syn26535909
     htan download synapse syn26535909 --output-dir ./data --dry-run
 """
 
-import argparse
 import os
 import re
 import sys
+
+import click
 
 
 SYNAPSE_ID_PATTERN = re.compile(r"^syn\d+$")
@@ -99,21 +100,34 @@ def download(synapse_id, output_dir=".", dry_run=False):
 
 # --- CLI ---
 
-def cli_main(argv=None):
-    """CLI entry point for Synapse downloads."""
-    parser = argparse.ArgumentParser(
-        description="Download HTAN open-access files from Synapse",
-        epilog="Examples:\n"
-        "  htan download synapse syn26535909\n"
-        "  htan download synapse syn26535909 --output-dir ./data\n"
-        "  htan download synapse syn26535909 --dry-run\n",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("synapse_id", help="Synapse entity ID (e.g., syn26535909)")
-    parser.add_argument("--output-dir", "-o", default=".", help="Output directory")
-    parser.add_argument("--dry-run", action="store_true", help="Show metadata without downloading")
+_SYNAPSE_EPILOG = """\
+Examples:
 
-    args = parser.parse_args(argv)
-    path = download(args.synapse_id, output_dir=args.output_dir, dry_run=args.dry_run)
+  htan download synapse syn26535909
+  htan download synapse syn26535909 --output-dir ./data
+  htan download synapse syn26535909 --dry-run
+"""
+
+
+@click.command(name="synapse", epilog=_SYNAPSE_EPILOG)
+@click.argument("synapse_id")
+@click.option("--output-dir", "-o", "output_dir", default=".", show_default=True,
+              help="Output directory")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Show metadata without downloading")
+def synapse(synapse_id, output_dir, dry_run):
+    """Download HTAN open-access files from Synapse by entity ID."""
+    path = download(synapse_id, output_dir=output_dir, dry_run=dry_run)
     if path:
-        print(path)
+        click.echo(path)
+
+
+def cli_main(argv=None):
+    """Backward-compatible entry point — invokes the Click :data:`synapse` command."""
+    try:
+        return synapse.main(args=argv, prog_name="htan download synapse", standalone_mode=False)
+    except click.exceptions.Exit as e:
+        sys.exit(e.exit_code)
+    except click.exceptions.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)
