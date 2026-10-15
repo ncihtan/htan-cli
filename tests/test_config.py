@@ -112,11 +112,46 @@ def test_load_portal_config_from_file(monkeypatch, tmp_path):
     assert cfg["host"] == "example.com"
 
 
-def test_load_portal_config_raises_when_none(monkeypatch, tmp_path):
+def test_load_portal_config_fetches_public_default(monkeypatch, tmp_path):
+    """With no env/keychain/file, resolution fetches the public read-only creds."""
     monkeypatch.delenv("HTAN_PORTAL_CREDENTIALS", raising=False)
     monkeypatch.setattr("htan.config._load_from_keychain", lambda: None)
-    with pytest.raises(ConfigError, match="Portal credentials not configured"):
+    fetched = {"host": "h", "port": 8443, "user": "htanwebuser",
+               "password": "p", "default_database": "auto"}
+    monkeypatch.setattr("htan.config._load_public_default", lambda: dict(fetched))
+    cfg = load_portal_config(config_path=str(tmp_path / "missing.json"))
+    assert cfg["user"] == "htanwebuser"
+
+
+def test_load_portal_config_raises_when_offline(monkeypatch, tmp_path):
+    """No config anywhere and portal unreachable -> ConfigError."""
+    monkeypatch.delenv("HTAN_PORTAL_CREDENTIALS", raising=False)
+    monkeypatch.setattr("htan.config._load_from_keychain", lambda: None)
+    monkeypatch.setattr("htan.config._load_public_default", lambda: None)
+    with pytest.raises(ConfigError, match="could not"):
         load_portal_config(config_path=str(tmp_path / "missing.json"))
+
+
+def test_parse_creds_from_bundle():
+    """Extract creds from a minified portal bundle snippet."""
+    from htan.config import _parse_creds_from_bundle
+    js = (
+        'x(){let _="HT4N_secret";if(!_)throw Error("NEXT_PUBLIC_CLICKHOUSE_PASSWORD '
+        'is not configured");return}'
+        'createClient({url:"https://abc.us-east-1.aws.clickhouse.cloud:8443/db",'
+        'username:"htanwebuser",password:_})'
+    )
+    cfg = _parse_creds_from_bundle(js)
+    assert cfg["user"] == "htanwebuser"
+    assert cfg["password"] == "HT4N_secret"
+    assert cfg["host"] == "abc.us-east-1.aws.clickhouse.cloud"
+    assert cfg["port"] == 8443
+
+
+def test_parse_creds_from_bundle_no_match():
+    """Chunks without the password marker return None."""
+    from htan.config import _parse_creds_from_bundle
+    assert _parse_creds_from_bundle("some unrelated js") is None
 
 
 # --- detect_source ---
@@ -126,11 +161,19 @@ def test_detect_source_env(monkeypatch):
     assert detect_source() == "env"
 
 
-def test_detect_source_none(monkeypatch):
+def test_detect_source_never_none(monkeypatch):
     monkeypatch.delenv("HTAN_PORTAL_CREDENTIALS", raising=False)
-    # This may find keychain or file on the developer machine, so we just check it returns a string or None
+    # May find keychain or file on the developer machine; otherwise the baked-in
+    # default always applies, so this never returns None.
     result = detect_source()
-    assert result in ("env", "keychain", "file", None)
+    assert result in ("env", "keychain", "file", "default")
+
+
+def test_detect_source_default(monkeypatch):
+    monkeypatch.delenv("HTAN_PORTAL_CREDENTIALS", raising=False)
+    monkeypatch.setattr("htan.config._load_from_keychain", lambda: None)
+    monkeypatch.setattr("htan.config._load_from_file", lambda config_path=None: None)
+    assert detect_source() == "default"
 
 
 # --- get_clickhouse_url ---
