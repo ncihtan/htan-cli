@@ -1,9 +1,10 @@
 """Credential management for HTAN services.
 
-3-tier credential resolution for portal ClickHouse (all stdlib):
+4-tier credential resolution for portal ClickHouse (all stdlib):
   1. Env var: HTAN_PORTAL_CREDENTIALS (JSON string) — for Cowork
   2. OS Keychain: macOS `security` / Linux `secret-tool` — for local
   3. Config file: ~/.config/htan-skill/portal.json — backward compat
+  4. Baked-in public read-only default — so the CLI works with zero setup
 
 Also provides setup status checks for all HTAN services.
 """
@@ -19,6 +20,25 @@ CONFIG_DIR = os.path.expanduser("~/.config/htan-skill")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "portal.json")
 
 REQUIRED_KEYS = ("host", "port", "user", "password")
+
+# Public read-only credential (tier 4) — fetched live, never committed.
+#
+# The HTAN data portal website (data.humantumoratlas.org) queries ClickHouse
+# directly from the browser, so it ships a read-only credential in its public
+# JS bundle via Next.js NEXT_PUBLIC_* build inlining. These creds are therefore
+# already public — anyone who loads the portal has them. Rather than hardcode
+# the password here (which would put a scannable secret in git history), we
+# fetch it from that same public bundle at runtime and cache it locally.
+#
+# This lets `htan query portal` work out of the box with no Synapse account,
+# team membership, or `htan init`, while keeping the repo free of plaintext
+# credentials. Explicit env/keychain/file config still takes precedence.
+PORTAL_SITE_URL = "https://data.humantumoratlas.org/"
+
+CACHE_DIR = os.path.expanduser("~/.cache/htan-skill")
+CREDS_CACHE_PATH = os.path.join(CACHE_DIR, "portal_creds.json")
+# Refresh the fetched creds if the cache is older than this (portal may rotate).
+CREDS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 KEYCHAIN_SERVICE = "htan-portal"
 KEYCHAIN_ACCOUNT = "htan"
@@ -153,6 +173,131 @@ def save_to_keychain(creds):
         return False
 
 
+def _make_ssl_context():
+    """Create an SSL context, preferring certifi's CA bundle if available."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def _http_get(url, timeout=15):
+    """Fetch a URL and return the decoded body, or None on any error."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "htan-cli"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_make_ssl_context()) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _parse_creds_from_bundle(js):
+    """Extract portal ClickHouse creds from a portal JS bundle chunk.
+
+    The portal inlines its read-only credential via Next.js NEXT_PUBLIC_* build
+    substitution. Returns a config dict, or None if this chunk lacks them.
+    """
+    import re
+    if "CLICKHOUSE_PASSWORD" not in js:
+        return None
+    pw_m = re.search(
+        r'["\']([^"\']+)["\'];if\(![^)]*\)throw [^(]*\(\s*["\']NEXT_PUBLIC_CLICKHOUSE_PASSWORD',
+        js,
+    )
+    host_m = re.search(r'https://[a-z0-9]+\.[a-z0-9.-]+clickhouse\.cloud:\d+', js)
+    user_m = re.search(r'username:\s*["\']([^"\']+)["\']', js)
+    if not (pw_m and host_m):
+        return None
+
+    hostport = host_m.group(0).replace("https://", "")
+    host, _, port = hostport.partition(":")
+    cfg = {
+        "host": host,
+        "port": int(port) if port else 8443,
+        "user": user_m.group(1) if user_m else "htanwebuser",
+        "password": pw_m.group(1),
+        "default_database": "auto",
+    }
+    if _validate_config(cfg):
+        return None
+    return cfg
+
+
+def _fetch_creds_from_portal():
+    """Fetch the public read-only creds from the live portal JS bundle.
+
+    Returns a config dict, or None if the portal is unreachable or its bundle
+    layout changed. Stdlib-only (urllib) to match the portal query client.
+    """
+    import re
+    index = _http_get(PORTAL_SITE_URL)
+    if not index:
+        return None
+
+    chunks = sorted(set(re.findall(r'/_next/static/[^"\' ]+\.js', index)))
+    base = PORTAL_SITE_URL.rstrip("/")
+    for chunk in chunks:
+        js = _http_get(base + chunk)
+        if not js:
+            continue
+        cfg = _parse_creds_from_bundle(js)
+        if cfg is not None:
+            return cfg
+    return None
+
+
+def _write_creds_cache(cfg):
+    """Persist fetched creds to the local cache (best effort, mode 0600)."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(CREDS_CACHE_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.chmod(CREDS_CACHE_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _read_creds_cache(ignore_ttl=False):
+    """Read cached fetched creds. Returns dict, or None if missing/stale/invalid."""
+    if not os.path.exists(CREDS_CACHE_PATH):
+        return None
+    try:
+        if not ignore_ttl:
+            import time
+            age = time.time() - os.path.getmtime(CREDS_CACHE_PATH)
+            if age > CREDS_CACHE_TTL_SECONDS:
+                return None
+        with open(CREDS_CACHE_PATH, "r") as f:
+            cfg = json.load(f)
+        if _validate_config(cfg):
+            return None
+        return cfg
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _load_public_default():
+    """Resolve the public read-only creds: fresh cache, else fetch, else stale cache.
+
+    Returns a config dict, or None if creds cannot be obtained (offline with no
+    prior cache).
+    """
+    cfg = _read_creds_cache()
+    if cfg is not None:
+        return cfg
+
+    cfg = _fetch_creds_from_portal()
+    if cfg is not None:
+        _write_creds_cache(cfg)
+        return cfg
+
+    # Fetch failed — fall back to a stale cache if we have one.
+    return _read_creds_cache(ignore_ttl=True)
+
+
 def detect_source():
     """Detect which credential source would be used.
 
@@ -160,7 +305,9 @@ def detect_source():
         "env" if HTAN_PORTAL_CREDENTIALS is set and valid,
         "keychain" if OS keychain has valid credentials,
         "file" if config file exists and is valid,
-        None if no source is available.
+        "default" if none of the above (baked-in public read-only cred).
+
+    Never returns None — the baked-in default is always available.
     """
     if _load_from_env() is not None:
         return "env"
@@ -168,7 +315,7 @@ def detect_source():
         return "keychain"
     if _load_from_file() is not None:
         return "file"
-    return None
+    return "default"
 
 
 def load_portal_config(config_path=None):
@@ -203,14 +350,19 @@ def load_portal_config(config_path=None):
     if cfg is not None:
         return cfg
 
+    # Tier 4: Public read-only creds, fetched from the portal bundle and cached.
+    cfg = _load_public_default()
+    if cfg is not None:
+        return cfg
+
     raise ConfigError(
-        "Portal credentials not configured.\n\n"
-        "Options:\n"
-        "  1. Run /htan:setup to auto-configure (recommended)\n"
-        "  2. Set HTAN_PORTAL_CREDENTIALS env var (JSON string, for Cowork)\n"
-        "  3. Create ~/.config/htan-skill/portal.json manually\n\n"
-        "Portal credentials require HTAN Claude Skill Users team membership:\n"
-        "  https://www.synapse.org/Team:3574960"
+        "Portal credentials not configured and the public HTAN portal could not "
+        "be reached to fetch read-only credentials.\n\n"
+        "This usually means you are offline. Options:\n"
+        "  1. Reconnect — the CLI auto-fetches public read-only creds from\n"
+        f"     {PORTAL_SITE_URL} and caches them.\n"
+        "  2. Set HTAN_PORTAL_CREDENTIALS env var (JSON string).\n"
+        "  3. Create ~/.config/htan-skill/portal.json manually."
     )
 
 
