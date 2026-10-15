@@ -229,11 +229,18 @@ htan download gen3 resolve "drs://dg.4DFC/your-guid"
 
 ## Release process
 
-1. Update `version` in `pyproject.toml` (e.g. `0.2.0` → `0.2.1`).
-2. Commit and tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Build: `uv build` → produces `dist/htan-X.Y.Z-py3-none-any.whl` + sdist.
-4. Publish: `uv publish` (requires `UV_PUBLISH_TOKEN` or `~/.pypirc`).
-5. Verify on https://pypi.org/project/htan/.
+Publishing is automated by `.github/workflows/publish.yml` using PyPI trusted publishing (OIDC, no API token in the repo).
+
+1. Bump the version: `uv version --bump patch` (or `minor` / `major`), or edit `version` in `pyproject.toml`.
+2. Commit, then tag and push: `git tag vX.Y.Z && git push origin main vX.Y.Z`.
+3. The tag push triggers the workflow: it checks that the tag matches the `pyproject.toml` version, runs the tests, runs `uv build`, and publishes the wheel + sdist with `pypa/gh-action-pypi-publish` (which also uploads attestations).
+4. Verify on https://pypi.org/project/htan/.
+
+One-time setup (required before the first automated release):
+- On PyPI, open the `htan` project → Settings → Publishing → add a GitHub trusted publisher: owner `ncihtan`, repo `htan-cli`, workflow `publish.yml`, environment `pypi`.
+- On GitHub, create a `pypi` environment under repo Settings → Environments (add required reviewers there if you want a manual approval gate).
+
+Manual fallback: `uv build && uv publish` (needs `UV_PUBLISH_TOKEN`).
 
 ## HTAN atlas centers
 
